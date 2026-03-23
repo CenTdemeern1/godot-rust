@@ -158,23 +158,29 @@ pub struct FairlyDocumented {
     #[doc = r#"this is very documented"#]
     #[var]
     item: f32,
+
     #[doc = "@deprecated use on your own risk!!"]
     #[doc = ""]
     #[doc = "not to be confused with B!"]
     #[export]
     a: i32,
+
     /// Some docs…
     /// @experimental idk.
     #[export]
     b: i64,
+
     /// is it documented?
     #[var]
     item_2: i64,
+
     #[var]
     /// this docstring has < a special character
     item_xml: GString,
-    /// this isnt documented
+
+    /// this isn't documented
     _other_item: (),
+
     /// nor this
     base: Base<Node>,
 }
@@ -286,6 +292,15 @@ impl FairlyDocumented {
     /// The `Gd<Node>` param should be properly escaped
     #[signal]
     fn documented_signal(p: Vector3, w: f64, node: Gd<Node>);
+
+    // Unlike #[signal(internal)], a leading underscore does NOT hide the signal from docs/editor.
+    /// Underscore signal docs.
+    #[signal]
+    fn _underscore_signal(p: Vector2);
+
+    /// Won't appear in editor, due to #[signal(internal)].
+    #[signal(internal)]
+    fn internal_signal(q: Vector2i);
 
     /// My signal
     ///

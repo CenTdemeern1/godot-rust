@@ -225,6 +225,10 @@ fn format_venial_params_xml(params: &venial::Punctuated<venial::FnParam>) -> Str
 }
 
 fn format_signal_xml(signal: &SignalDefinition) -> Option<String> {
+    if signal.is_internal {
+        return None;
+    }
+
     let name = &signal.fn_signature.name;
     let name = xml_escape(name.to_string());
 
