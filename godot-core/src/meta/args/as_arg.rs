@@ -7,7 +7,7 @@
 
 use crate::builtin::{Callable, GString, NodePath, Signal, StringName, Variant};
 use crate::meta::sealed::Sealed;
-use crate::meta::traits::{Element, GodotFfiVariant, GodotNullableFfi, PackedElement};
+use crate::meta::traits::{Element, GodotFfiVariant, GodotNullableType, PackedElement};
 use crate::meta::{CowArg, EngineToGodot, FfiArg, GodotType, ObjectArg, ToGodot};
 use crate::obj::{DynGd, Gd, GodotClass, Inherits};
 
@@ -722,8 +722,7 @@ pub enum ByOption<Via> {
 impl<Via> Sealed for ByOption<Via> {}
 impl<Via> ArgPassing for ByOption<Via>
 where
-    Via: GodotType,
-    for<'f> Via::ToFfi<'f>: GodotNullableFfi,
+    Via: GodotNullableType,
 {
     type Output<'r, T: 'r>
         = Option<&'r Via>
@@ -747,11 +746,13 @@ where
     fn ref_to_ffi<T>(value: &T) -> Self::FfiOutput<'_, T::Via>
     where
         T: EngineToGodot<Pass = Self>,
-        T::Via: GodotType,
     {
         // Reuse pattern from impl GodotType for Option<T>:
         // Convert Option<&Via> to Option<Via::ToFfi> and then flatten to Via::ToFfi with null handling.
-        GodotNullableFfi::flatten_option(value.engine_to_godot().map(|via_ref| via_ref.to_ffi()))
+        value
+            .engine_to_godot()
+            .map(|via_ref| via_ref.to_ffi())
+            .unwrap_or_else(Via::ffi_null_ref)
     }
 }
 
