@@ -15,8 +15,7 @@
 use crate::builtin::NodePath;
 use crate::classes::{Node, PackedScene};
 use crate::global::Error;
-use crate::meta::error::ConvertError;
-use crate::meta::{AsArg, ByValue, FromGodot, GodotConvert, GodotShape, ToGodot, arg_into_ref};
+use crate::meta::{AsArg, arg_into_ref};
 use crate::obj::{Gd, Inherits};
 
 /// Manual extensions for the `Node` class.
@@ -91,44 +90,39 @@ impl Error {
     /// This is a convenience method that may be used to convert this type into one that can be used with the try operator (`?`)
     /// for easy short circuiting of Godot `Error`s.
     ///
-    /// To assist with this, `Result<(), Error>` has [a `ToGodot` implementation](ToGodot#impl-ToGodot-for-Result%3C(),+Error%3E)
-    /// that turns it back into an `Error` on Godot's side, so that it can be used as the return value of `#[func]` functions.
+    /// ```
+    /// use godot::global::Error;
+    ///
+    /// assert_eq!(Error::OK.err(), Ok(()));
+    /// assert_eq!(Error::FAILED.err(), Err(Error::FAILED));
+    /// ```
     pub fn err(self) -> Result<(), Self> {
         if self == Error::OK { Ok(()) } else { Err(self) }
     }
 
     /// Creates an `Error` from a `Result<(), Error>`, the inverse of [`.err()`](Self::err).
-    /// 
+    ///
     /// `Ok(())` becomes `Error::OK`, and `Err(e)` becomes `e`.
+    ///
+    /// This can be used to implement "makeshift try blocks",
+    /// or somehow else process the return value of a function that returns `Result<(), Error>`.
+    /// ```
+    /// use godot::global::Error;
+    ///
+    /// // Makeshift try block
+    /// assert_eq!(
+    ///     Error::from_result((|| {
+    ///         Error::OK.err()?;
+    ///         Error::FAILED.err()?;
+    ///         Ok(())
+    ///     })()),
+    ///     Error::FAILED
+    /// );
+    /// ```
     pub fn from_result(result: Result<(), Self>) -> Self {
         match result {
             Ok(()) => Error::OK,
             Err(e) => e,
         }
-    }
-}
-
-/// Transparent `GodotConvert` implementation that uses `<Error as GodotConvert>`'s properties, so it uses the same representation.
-impl GodotConvert for Result<(), Error> {
-    type Via = <Error as GodotConvert>::Via;
-
-    fn godot_shape() -> GodotShape {
-        Error::godot_shape()
-    }
-}
-
-/// Shim that can turn incoming `Error` values into `Result<(), Error>`s, where `Error::OK` becomes `Ok(())`.
-impl FromGodot for Result<(), Error> {
-    fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
-        Ok(Error::try_from_godot(via)?.err())
-    }
-}
-
-/// Shim that turns outgoing `Result<(), Error>` values into `Error`s, where `Ok(())` becomes `Error::OK`.
-impl ToGodot for Result<(), Error> {
-    type Pass = ByValue;
-
-    fn to_godot(&self) -> Self::Via {
-        Error::from_result(*self).to_godot()
     }
 }
