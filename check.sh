@@ -61,8 +61,13 @@ END='\033[0m'
 ################################################################################
 
 # Drop-in replacement for `echo` that outputs to stderr and adds a newline.
+# Use `logf` for format strings with color codes (instead of nonportable `echo -e`).
 function log() {
     echo "$@" >&2
+}
+function logf() {
+    # shellcheck disable=SC2059
+    printf "$@" >&2
 }
 
 # Converts a x.x.x version string to a feature string.
@@ -107,7 +112,7 @@ function findGodot() {
 
     # User-defined GODOT4_BIN (deprecated, fallback to old name).
     elif [[ -n "$GODOT4_BIN" ]]; then
-        log -e "${YELLOW}Warning: \`GODOT4_BIN\` is deprecated, use \`GDRUST_GODOT_BIN\` instead.${END}"
+        logf "${YELLOW}Warning: \`GODOT4_BIN\` is deprecated, use \`GDRUST_GODOT_BIN\` instead.${END}\n"
         log "Using environment variable GODOT4_BIN=$(printf %q "$GODOT4_BIN")"
         godotBin="$GODOT4_BIN"
 
@@ -154,7 +159,7 @@ function cmd_fmt() {
     if [[ $(rustup toolchain list) =~ nightly ]]; then
         run cargo +nightly fmt --all -- --check
     else
-        log -e "${YELLOW}Warning: nightly toolchain not found; stable rustfmt might not pass CI.${END}"
+        logf "${YELLOW}Warning: nightly toolchain not found; stable rustfmt might not pass CI.${END}\n"
         run cargo fmt --all -- --check
     fi
 }
@@ -191,44 +196,32 @@ function cmd_itest() {
     findGodot && \
         run cargo build -p itest "${extraCargoArgs[@]}" || return 1
 
-    # Logic to abort immediately if Godot outputs certain keywords (would otherwise fail only in CI).
     # Keep in sync with: .github/composite/godot-itest/action.yml (steps "Run Godot integration tests" and "Check for memory leaks").
 
     local logFile
     logFile=$(mktemp)
 
-    cd itest/godot
-
-    # Explanation:
-    # * tee:      still output logs while scanning for errors.
-    # * grep -q:  no output, use exit code 0 if found -> thus also &&.
-    # * pkill:    stop Godot execution (since it hangs in headless mode); simple 'head -1' did not work as expected
-    #             since it's not available on Windows, use taskkill in that case.
-    # * exit:     the terminated process would return 143, but this is more explicit and future-proof.
+    cd itest/godot || return 1
     "$godotBin" --headless -- "[${extraArgs[@]}]" 2>&1 \
-    | tee "$logFile" \
-    | tee >(grep -E "SCRIPT ERROR:|Can't open dynamic library|Error loading extension" -q && {
-      printf "\n${RED}Error: Script or dlopen error, abort...${END}\n" >&2;
-      # Unlike CI; do not kill processes called "godot" on user machine.
-      exit 2
-    })
+    | tee "$logFile"
 
-    local exitCode=$?
+    # PIPESTATUS[0] is Godot's exit code; $? would only give tee's exit code (masking crashes).
+    local exitCode=${PIPESTATUS[0]}
 
     # Check for unrecoverable errors in log.
     if grep -qE "SCRIPT ERROR:|Can't open dynamic library" "$logFile"; then
-      log -e "\n${RED}Error: Unrecoverable Godot error detected in logs.${END}"
+      logf "\n${RED}Error: Unrecoverable Godot error detected in logs.${END}\n"
       exitCode=2
     fi
 
     # Check for memory leaks.
     if grep -q "ObjectDB instances leaked at exit" "$logFile"; then
-      log -e "\n${RED}Error: Memory leak detected.${END}"
+      logf "\n${RED}Error: Memory leak detected.${END}\n"
       exitCode=3
     fi
 
     rm -f "$logFile"
-    cd ../..
+    cd ../.. || return 1
 
     return $exitCode
 }
@@ -326,7 +319,7 @@ while [[ $# -gt 0 ]]; do
 
             # Remove "clippy" from the default commands if the API version is specified
             # since it can produce unexpected errors.
-            DEFAULT_COMMANDS=("${DEFAULT_COMMANDS[@]/clippy}")
+            readarray -t DEFAULT_COMMANDS < <(printf '%s\n' "${DEFAULT_COMMANDS[@]}" | grep -v '^clippy$')
 
             shift
             ;;
@@ -358,15 +351,15 @@ done
 cmds=("${filtered_commands[@]}")
 
 # Display warning about using clippy if an API version was provided.
-if [[ "${#apiFeature[@]}" -ne 0 ]]; then
+if [[ -n "$apiFeature" ]]; then
     log
     # Show different warning depending on if clippy was explicitly requested.
     if [[ "$runClippy" -eq 1 ]]; then
-        log -e "${YELLOW}Warning: Clippy may produce unexpected errors when testing against a specific API version.${END}"
+        logf "${YELLOW}Warning: Clippy may produce unexpected errors when testing against a specific API version.${END}\n"
     else
-        log -e "${YELLOW}Warning: Clippy is disabled by default when using a specific Godot API version.${END}"
+        logf "${YELLOW}Warning: Clippy is disabled by default when using a specific Godot API version.${END}\n"
     fi
-    log -e "${YELLOW}For more information, see ${CYAN}https://github.com/godot-rust/gdext/pull/1016#issuecomment-2629002047${END}"
+    logf "${YELLOW}For more information, see ${CYAN}https://github.com/godot-rust/gdext/pull/1016#issuecomment-2629002047${END}\n"
     log
 fi
 
@@ -394,19 +387,19 @@ function compute_elapsed() {
 for cmd in "${cmds[@]}"; do
     "cmd_${cmd//-/_}" || {
         compute_elapsed
-        log -ne "$RED\n=========================="
-        log -ne "\ngodot-rust: checks FAILED."
-        log -ne "\n==========================\n$END"
-        log -ne "\nTotal duration: $elapsed.\n"
+        logf "$RED\n=========================="
+        logf "\ngodot-rust: checks FAILED."
+        logf "\n==========================\n$END"
+        logf "\nTotal duration: $elapsed.\n"
         exit 1
     }
 done
 
 compute_elapsed
-log -ne "$CYAN\n=============================="
-log -ne "\ngodot-rust: checks SUCCESSFUL."
-log -ne "\n==============================\n$END"
-log -ne "\nTotal duration: $elapsed.\n"
+logf "$CYAN\n=============================="
+logf "\ngodot-rust: checks SUCCESSFUL."
+logf "\n==============================\n$END"
+logf "\nTotal duration: $elapsed.\n"
 
 # If invoked with sh instead of bash, pressing Up arrow after executing `sh check.sh` may cause a `[A` to appear.
 # See https://unix.stackexchange.com/q/103608.
