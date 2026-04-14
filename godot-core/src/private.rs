@@ -63,14 +63,19 @@ sys::plugin_registry!(pub __GODOT_DOCS_REGISTRY: DocsPlugin);
 // Thread-local storage for rich `CallError` produced by `#[func]` methods returning `Result<T, E>`.
 //
 // When a Rust `#[func]` fails (returns Err), the error is stashed here so that Rust's `try_call()` can retrieve it
-// after the Godot round-trip. The varcall FFI callback simultaneously sets a *standard* Godot error code
-// (`GDEXTENSION_CALL_ERROR_INVALID_ARGUMENT`) so that Godot's own GDScript VM recognizes the failure and aborts
-// the calling script function.
+// after the Godot round-trip. The varcall FFI callback simultaneously sets `CALL_FAILED_STATUS` so that Godot's own
+// GDScript VM recognizes the failure and aborts the calling script function.
 //
 // Thread-safety: varcall callbacks execute on the calling thread, and `try_call` reads the result on the same
 // thread before any other call can overwrite it. No mutex is needed.
 thread_local! {
     static LAST_CALL_ERROR: Cell<Option<CallError>> = const { Cell::new(None) };
+
+    // Depth of active Rust-initiated out-calls to Godot on the class out-call path (`out_class_varcall`, reached via
+    // `call`/`try_call`). When > 0, we're waiting for an FFI round-trip. If Godot re-enters Rust and a `#[func]` fails,
+    // the Rust caller will observe the error via the `CallResult`/`CallError` return -- so the in-Godot print would
+    // just be noise. Panic prints are still emitted (backtrace info is worth keeping regardless of out-call context).
+    static OUT_CALL_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Store a [`CallError`] in thread-local storage for later retrieval by [`call_error_take`].
@@ -83,6 +88,26 @@ fn call_error_store(err: CallError) {
 /// Returns `None` if no error was stored (i.e. the failure originated from Godot, not from gdext).
 pub(crate) fn call_error_take() -> Option<CallError> {
     LAST_CALL_ERROR.take()
+}
+
+/// RAII guard marking that a Rust-initiated out-call to Godot is in progress on this thread.
+///
+/// While any guard is live, inbound `#[func]` failures on the same thread skip their `godot_error!` print, since the Rust
+/// caller already observes the failure via the returned `CallError`/panic and the extra print would be redundant noise.
+pub(crate) struct OutCallGuard;
+
+impl OutCallGuard {
+    #[must_use = "guard must be bound to a local; dropping it immediately ends the out-call scope"]
+    pub fn new() -> Self {
+        OUT_CALL_DEPTH.with(|d| d.set(d.get() + 1));
+        Self
+    }
+}
+
+impl Drop for OutCallGuard {
+    fn drop(&mut self) {
+        OUT_CALL_DEPTH.with(|d| d.set(d.get() - 1));
+    }
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
@@ -423,6 +448,18 @@ where
     result
 }
 
+// Error code set on the varcall output when a `#[func]` fails (panic, parameter conversion, or `Result<T, E>` returning `Err`).
+//
+// None of the existing GDExtension call errors is great for this scenario -- all lead to misleading messages in the Godot console.
+// A custom out-of-range value causes "Bug: Invalid call error code 1337." in Godot's output, which is at least clearly non-standard.
+// Note that INVALID_METHOD must not be used: it signals that the method doesn't exist, which GDScript may treat as a fatal static error.
+// An alternative would be GDEXTENSION_CALL_ERROR_INSTANCE_IS_NULL.
+//
+// The GDScript VM interprets any non-OK code as "call failed, abort calling function", which is what we want. The "Bug: ..." print is
+// unavoidable at the VM level (no GDExtension code maps to a clean message); the preceding godot-rust `CallError` print carries the
+// actual diagnostic information.
+const CALL_FAILED_STATUS: sys::GDExtensionCallErrorType = 1337;
+
 /// Invokes a function with the _varcall_ calling convention, handling both expected errors and user panics.
 pub fn handle_fallible_varcall<F, R>(
     call_ctx: &CallContext,
@@ -432,14 +469,10 @@ pub fn handle_fallible_varcall<F, R>(
     F: FnOnce() -> CallResult<R> + std::panic::UnwindSafe,
 {
     if handle_fallible_call(call_ctx, code) {
-        // Use a non-OK error code so the GDScript VM recognizes the failure and aborts the calling function.
+        // Use CALL_FAILED_STATUS so the GDScript VM recognizes the failure and aborts the calling function.
         // The Rust-side CallError has been stored in the thread-local, so that try_call() can retrieve it later.
-        //
-        // None of the existing call errors is great for this scenario, and all lead to misleading errors in the Godot console.
-        // For now we opted for custom code, which will result in "Bug: Invalid call error code 1337.". Note that INVALID_METHOD
-        // must not be used -- it signals that the method doesn't exist, which can be treated as a fatal static error by GDScript.
         *out_err = sys::GDExtensionCallError {
-            error: 1337 as sys::GDExtensionCallErrorType, // alternative: sys::GDEXTENSION_CALL_ERROR_INSTANCE_IS_NULL.
+            error: CALL_FAILED_STATUS,
             argument: 0,
             expected: 0,
         };
@@ -478,9 +511,13 @@ where
     };
 
     // Print failed calls to Godot's console.
-    // TODO(v0.6): Level 1 is not yet set, so this will always print if level != 0. Needs better logic to recognize try_* calls and avoid printing.
-    // But a bit tricky with multiple threads and re-entrancy; maybe pass in info in error struct.
-
+    //
+    // OUT_CALL_DEPTH > 0 means this failure is observed during a Rust-initiated out-call (e.g. `try_call`); the caller already sees
+    // the `CallError` via return value, so printing here would just be noise.
+    //
+    // Coverage gap: only `Signature::out_class_varcall` sets the guard. If a `#[func]` re-enters Rust via `out_utility_call`,
+    // `out_builtin_ptrcall`, or `out_script_virtual_call`, the redundant print returns. Extend the guard to those paths if reported.
+    //
     // caused_by_panic() check to avoid printing (2) once the panic message (1) is already printed:
     //
     // (1)  ERROR: [panic hot-reload/rust/src/lib.rs:37]
@@ -494,7 +531,10 @@ where
     // (2) ERROR: godot-rust function call failed: MyClass::my_method()
     //        Reason: function panicked: some panic message
     //     at: ...
-    if has_error_print_level(2) && !call_error.caused_by_panic() {
+    if has_error_print_level(2)
+        && !call_error.caused_by_panic()
+        && OUT_CALL_DEPTH.with(|d| d.get() == 0)
+    {
         godot_error!("{call_error}");
     }
 
