@@ -101,6 +101,15 @@ fn object_arg_option_borrowed_mut() {
     });
 }
 
+// Changed in 4.7: https://github.com/godotengine/godot/pull/118588#discussion_r3083054076
+fn expected_property_err() -> global::Error {
+    if godot::init::GdextBuild::since_api("4.7") {
+        global::Error::ERR_INVALID_PARAMETER
+    } else {
+        global::Error::ERR_UNAVAILABLE
+    }
+}
+
 #[itest]
 fn object_arg_option_none() {
     let manual: Option<Gd<Node>> = None;
@@ -109,10 +118,10 @@ fn object_arg_option_none() {
     // Will emit errors but should not crash.
     let db = ClassDb::singleton();
     let error = db.class_set_property(manual.as_ref(), "name", &Variant::from("hello"));
-    assert_eq!(error, global::Error::ERR_UNAVAILABLE);
+    assert_eq!(error, expected_property_err());
 
     let error = db.class_set_property(refc.as_ref(), "value", &Variant::from(-123));
-    assert_eq!(error, global::Error::ERR_UNAVAILABLE);
+    assert_eq!(error, expected_property_err());
 }
 
 #[itest]
@@ -120,10 +129,10 @@ fn object_arg_null_arg() {
     // Will emit errors but should not crash.
     let db = ClassDb::singleton();
     let error = db.class_set_property(Gd::null_arg(), "name", &Variant::from("hello"));
-    assert_eq!(error, global::Error::ERR_UNAVAILABLE);
+    assert_eq!(error, expected_property_err());
 
     let error = db.class_set_property(Gd::null_arg(), "value", &Variant::from(-123));
-    assert_eq!(error, global::Error::ERR_UNAVAILABLE);
+    assert_eq!(error, expected_property_err());
 }
 
 // Regression test for https://github.com/godot-rust/gdext/issues/835.
