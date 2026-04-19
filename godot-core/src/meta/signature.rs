@@ -153,6 +153,9 @@ impl<Params: OutParamTuple, Ret: EngineFromGodot> Signature<Params, Ret> {
 
         let class_fn = sys::interface_fn!(object_method_bind_call);
 
+        // Silence inbound `#[func]` failure prints during this out-call; caller observes the error via the returned `CallError`.
+        let _guard = crate::private::OutCallGuard::new();
+
         let variant = args.with_variants(|explicit_args| {
             let mut variant_ptrs = Vec::with_capacity(explicit_args.len() + varargs.len());
             variant_ptrs.extend(explicit_args.iter().map(Variant::var_sys));
